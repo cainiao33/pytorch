@@ -1926,6 +1926,12 @@ class BuiltinVariable(BaseBuiltinVariable):
 
             return SourcelessBuilder.create(tx, object())
 
+        if self.fn is str.format:
+            # The builtin constant-fold handler formats as_python_constant()
+            # copies before call_format() runs; decline an attributed
+            # OrderedDict instead of folding away its instance __dict__.
+            StringFormatVariable.check_attributed_format(tx, args, kwargs)
+
         key: tuple[object, ...]
         if kwargs:
             kwargs = {k: v.realize() for k, v in kwargs.items()}
@@ -3702,6 +3708,16 @@ class GetAttrBuiltinVariable(BaseBuiltinVariable):
             # than propagating a graph break from tp_getattro_impl.
             if not check_unspec_or_constant_args(args, kwargs):
                 raise
+            first = args[0]
+            # isinstance (not exact type) so OrderedDictVariable subclasses get
+            # the same decline as the other eager-fold plugs.
+            drops_attrs = isinstance(first, variables.OrderedDictVariable) and (
+                first.eager_attr_fold_is_unsound(tx, args[1].as_python_constant())
+            )
+            if drops_attrs:
+                # getattr() on the rebuilt container would answer from a copy
+                # whose instance __dict__ is empty.
+                raise
             try:
                 result = getattr(*[a.as_python_constant() for a in args])
             except AttributeError:
@@ -3842,6 +3858,7 @@ class SetAttrBuiltinVariable(BaseBuiltinVariable):
         if isinstance(
             obj,
             (
+                variables.OrderedDictVariable,
                 variables.DefaultDictVariable,
                 variables.UserDefinedObjectVariable,
                 variables.NestedUserFunctionVariable,
